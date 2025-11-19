@@ -187,25 +187,32 @@ async function getProfitableStocks(stockNames) {
 async function getHighDividendStocksFromJuyuan(topN = 50) {
   try {
     console.log(`[聚源] 开始获取股息率最高的前${topN}只股票...`);
+    console.log(`[聚源] 当前时间: ${new Date().toISOString()}`);
     
     const client = createJuyuanClient();
     
     // 1. 查询A股高股息率股票（多查一些，因为后面要筛选）
-    const query = `A股市场滚动股息率TTM最高的前${topN * 3}只股票`;
+    const queryLimit = Math.min(topN * 5, 500); // 增加查询数量，但不超过500
+    const query = `A股市场滚动股息率TTM最高的前${queryLimit}只股票`;
     console.log(`[聚源] 查询语句: ${query}`);
+    console.log(`[聚源] 查询限制: ${queryLimit}只`);
     
+    const startTime = Date.now();
     const result = await client.nlQuery({
       query,
       answerType: 2,
-      limit: topN * 3
+      limit: queryLimit
     });
+    const duration = Date.now() - startTime;
+    console.log(`[聚源] API响应时间: ${duration}ms`);
     
     if (!result || !result.data) {
       console.error('[聚源] 返回空数据');
+      console.error('[聚源] 完整响应:', JSON.stringify(result).slice(0, 500));
       return [];
     }
     
-    console.log(`[聚源] API返回成功，开始解析数据...`);
+    console.log(`[聚源] API返回成功，数据组数: ${result.data.length}`);
     
     const stocks = [];
     
@@ -229,6 +236,7 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
           item.dividend_yield ?? 
           item.dividendYield ??
           item.dividendRatioTtm ??
+          item.value ??
           0
         );
         
@@ -239,12 +247,19 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
             dividend_yield: dividendYield,
           });
           
-          console.log(`[聚源] 找到: ${stockName} - ${dividendYield.toFixed(2)}%`);
+          if (stocks.length <= 10) {
+            console.log(`[聚源] 找到: ${stockName} (${stockCode}) - ${dividendYield.toFixed(2)}%`);
+          }
         }
       }
     }
     
     console.log(`[聚源] 共解析出 ${stocks.length} 只有效股票`);
+    
+    if (stocks.length === 0) {
+      console.error('[聚源] 警告：未解析出任何股票数据！');
+      console.error('[聚源] 请检查API返回的数据结构');
+    }
     
     // 2. 获取扣非净利润为正的股票列表
     const stockNames = stocks.map(s => s.name);
@@ -301,6 +316,10 @@ function buildPortfolio(stocks, topN) {
     stocks: portfolioStocks,
   };
 }
+
+// Vercel运行时配置
+export const runtime = 'nodejs';
+export const maxDuration = 60; // 最长60秒（需要Pro计划，Hobby是10秒）
 
 /**
  * GET /api/portfolio
