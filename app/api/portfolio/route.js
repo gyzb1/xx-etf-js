@@ -191,16 +191,19 @@ async function fillMissingStockCodes(stocks, client) {
     const stocksNeedingCode = stocks.filter(s => s._needsCodeLookup);
     if (stocksNeedingCode.length === 0) return;
     
-    // 批量查询股票基本信息
-    const stockNames = stocksNeedingCode.map(s => s.name).slice(0, 50); // 限制数量
-    const query = `A股市场股票名称包含${stockNames[0]}的股票代码`;
+    console.log(`[聚源] 需要查询 ${stocksNeedingCode.length} 只股票的代码`);
     
-    console.log(`[聚源] 查询股票代码，样本: ${stockNames.slice(0, 5).join(', ')}`);
+    // 使用股票名称列表查询
+    const stockNames = stocksNeedingCode.map(s => s.name);
+    const namesQuery = stockNames.slice(0, 20).join('、'); // 取前20个
+    const query = `A股市场股票简称为${namesQuery}的股票代码`;
+    
+    console.log(`[聚源] 查询: ${query.slice(0, 100)}...`);
     
     const result = await client.nlQuery({
-      query: `A股市场所有股票的代码和名称`,
+      query,
       answerType: 2,
-      limit: 5000
+      limit: stocksNeedingCode.length
     });
     
     if (!result || !result.data) {
@@ -213,11 +216,25 @@ async function fillMissingStockCodes(stocks, client) {
     for (const group of result.data) {
       if (!group.valueInfo) continue;
       
+      console.log(`[聚源] 处理代码组: ${group.indicatorEngName}`);
+      
       for (const item of group.valueInfo) {
-        const name = item.secuAbbr || item.securityName || '';
-        const code = item.prod_code || item.prodCode || item.secuCode || item.innerCode || item.stockCode || '';
+        const name = item.secuAbbr || item.securityName || item.security_abbreviation || '';
+        const code = item.prod_code || 
+                    item.prodCode || 
+                    item.security_code || 
+                    item.securityCode ||
+                    item.secuCode || 
+                    item.innerCode || 
+                    item.stockCode || 
+                    item.code ||
+                    '';
+        
         if (name && code) {
-          nameToCode.set(name, code);
+          // 转换为字符串并清理
+          const codeStr = String(code).trim();
+          nameToCode.set(name, codeStr);
+          console.log(`[聚源] 映射: ${name} -> ${codeStr}`);
         }
       }
     }
@@ -254,7 +271,7 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
     
     // 1. 查询A股高股息率股票（多查一些，因为后面要筛选）
     const queryLimit = Math.min(topN * 5, 500); // 增加查询数量，但不超过500
-    const query = `A股市场滚动股息率TTM最高的前${queryLimit}只股票的股票代码、股票名称和股息率`;
+    const query = `A股市场滚动股息率TTM最高的前${queryLimit}只股票`;
     console.log(`[聚源] 查询语句: ${query}`);
     console.log(`[聚源] 查询限制: ${queryLimit}只`);
     
@@ -302,16 +319,6 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
       for (const item of group.valueInfo) {
         const stockName = item.secuAbbr || item.securityName || item.stockName || '';
         
-        // 聚源返回的股票代码字段是 prod_code
-        const stockCode = item.prod_code || 
-                         item.prodCode ||
-                         item.secuCode || 
-                         item.innerCode || 
-                         item.stockCode || 
-                         item.code ||
-                         item.symbol ||
-                         '';
-        
         // 获取股息率（尝试多个可能的字段名）
         const dividendYield = Number(
           item.dividend_ratio_ttm ?? 
@@ -323,16 +330,16 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
         );
         
         if (stockName && dividendYield > 0) {
-          // 如果没有代码，先记录下来，稍后处理
+          // 聚源的股息率查询不返回股票代码，需要后续查询
           stocks.push({
-            code: stockCode || `UNKNOWN_${stockName}`,
+            code: '', // 稍后填充
             name: stockName,
             dividend_yield: dividendYield,
-            _needsCodeLookup: !stockCode
+            _needsCodeLookup: true
           });
           
           if (stocks.length <= 10) {
-            console.log(`[聚源] 找到: ${stockName} | 代码: ${stockCode || '缺失'} | 股息率: ${dividendYield.toFixed(2)}%`);
+            console.log(`[聚源] 找到: ${stockName} | 股息率: ${dividendYield.toFixed(2)}%`);
           }
         }
       }
