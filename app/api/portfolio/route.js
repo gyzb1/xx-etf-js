@@ -215,7 +215,7 @@ async function fillMissingStockCodes(stocks, client) {
       
       for (const item of group.valueInfo) {
         const name = item.secuAbbr || item.securityName || '';
-        const code = item.secuCode || item.innerCode || item.stockCode || '';
+        const code = item.prod_code || item.prodCode || item.secuCode || item.innerCode || item.stockCode || '';
         if (name && code) {
           nameToCode.set(name, code);
         }
@@ -254,7 +254,7 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
     
     // 1. 查询A股高股息率股票（多查一些，因为后面要筛选）
     const queryLimit = Math.min(topN * 5, 500); // 增加查询数量，但不超过500
-    const query = `A股市场滚动股息率TTM最高的前${queryLimit}只股票`;
+    const query = `A股市场滚动股息率TTM最高的前${queryLimit}只股票的股票代码、股票名称和股息率`;
     console.log(`[聚源] 查询语句: ${query}`);
     console.log(`[聚源] 查询限制: ${queryLimit}只`);
     
@@ -266,6 +266,18 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
     });
     const duration = Date.now() - startTime;
     console.log(`[聚源] API响应时间: ${duration}ms`);
+    
+    // 打印返回数据的结构样本
+    if (result && result.data && result.data.length > 0) {
+      console.log('[聚源] 数据结构样本:');
+      const sample = result.data[0];
+      console.log(`  - 指标名: ${sample.indicatorEngName}`);
+      if (sample.valueInfo && sample.valueInfo.length > 0) {
+        const item = sample.valueInfo[0];
+        console.log(`  - 字段: ${Object.keys(item).join(', ')}`);
+        console.log(`  - 样本数据:`, JSON.stringify(item).slice(0, 200));
+      }
+    }
     
     if (!result || !result.data) {
       console.error('[聚源] 返回空数据');
@@ -288,20 +300,17 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
       if (!indicatorName.includes('dividend')) continue;
       
       for (const item of group.valueInfo) {
-        const stockName = item.secuAbbr || item.securityName || '';
+        const stockName = item.secuAbbr || item.securityName || item.stockName || '';
         
-        // 尝试多个可能的股票代码字段
-        let stockCode = item.secuCode || 
-                       item.innerCode || 
-                       item.stockCode || 
-                       item.code ||
-                       item.symbol ||
-                       '';
-        
-        // 如果还是没有代码，尝试从其他字段提取
-        if (!stockCode && item.secuCode) {
-          stockCode = item.secuCode;
-        }
+        // 聚源返回的股票代码字段是 prod_code
+        const stockCode = item.prod_code || 
+                         item.prodCode ||
+                         item.secuCode || 
+                         item.innerCode || 
+                         item.stockCode || 
+                         item.code ||
+                         item.symbol ||
+                         '';
         
         // 获取股息率（尝试多个可能的字段名）
         const dividendYield = Number(
