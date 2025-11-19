@@ -181,6 +181,67 @@ async function getProfitableStocks(stockNames) {
 }
 
 /**
+ * 填充缺失的股票代码
+ */
+async function fillMissingStockCodes(stocks, client) {
+  try {
+    console.log('[聚源] 开始填充缺失的股票代码...');
+    
+    // 获取需要查询代码的股票名称
+    const stocksNeedingCode = stocks.filter(s => s._needsCodeLookup);
+    if (stocksNeedingCode.length === 0) return;
+    
+    // 批量查询股票基本信息
+    const stockNames = stocksNeedingCode.map(s => s.name).slice(0, 50); // 限制数量
+    const query = `A股市场股票名称包含${stockNames[0]}的股票代码`;
+    
+    console.log(`[聚源] 查询股票代码，样本: ${stockNames.slice(0, 5).join(', ')}`);
+    
+    const result = await client.nlQuery({
+      query: `A股市场所有股票的代码和名称`,
+      answerType: 2,
+      limit: 5000
+    });
+    
+    if (!result || !result.data) {
+      console.warn('[聚源] 无法获取股票代码映射');
+      return;
+    }
+    
+    // 建立名称到代码的映射
+    const nameToCode = new Map();
+    for (const group of result.data) {
+      if (!group.valueInfo) continue;
+      
+      for (const item of group.valueInfo) {
+        const name = item.secuAbbr || item.securityName || '';
+        const code = item.secuCode || item.innerCode || item.stockCode || '';
+        if (name && code) {
+          nameToCode.set(name, code);
+        }
+      }
+    }
+    
+    console.log(`[聚源] 建立了 ${nameToCode.size} 个股票的代码映射`);
+    
+    // 填充代码
+    let filledCount = 0;
+    for (const stock of stocks) {
+      if (stock._needsCodeLookup && nameToCode.has(stock.name)) {
+        stock.code = nameToCode.get(stock.name);
+        delete stock._needsCodeLookup;
+        filledCount++;
+      }
+    }
+    
+    console.log(`[聚源] 成功填充 ${filledCount} 个股票代码`);
+    
+  } catch (error) {
+    console.error('[聚源] 填充股票代码失败:', error.message);
+  }
+}
+
+/**
  * 从聚源AIDB获取高股息率股票
  * 并筛选出扣非净利润为正的股票
  */
@@ -227,8 +288,20 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
       if (!indicatorName.includes('dividend')) continue;
       
       for (const item of group.valueInfo) {
-        const stockName = item.secuAbbr || '';
-        const stockCode = item.secuCode || item.innerCode || '';
+        const stockName = item.secuAbbr || item.securityName || '';
+        
+        // 尝试多个可能的股票代码字段
+        let stockCode = item.secuCode || 
+                       item.innerCode || 
+                       item.stockCode || 
+                       item.code ||
+                       item.symbol ||
+                       '';
+        
+        // 如果还是没有代码，尝试从其他字段提取
+        if (!stockCode && item.secuCode) {
+          stockCode = item.secuCode;
+        }
         
         // 获取股息率（尝试多个可能的字段名）
         const dividendYield = Number(
@@ -241,14 +314,16 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
         );
         
         if (stockName && dividendYield > 0) {
+          // 如果没有代码，先记录下来，稍后处理
           stocks.push({
-            code: stockCode || stockName,
+            code: stockCode || `UNKNOWN_${stockName}`,
             name: stockName,
             dividend_yield: dividendYield,
+            _needsCodeLookup: !stockCode
           });
           
           if (stocks.length <= 10) {
-            console.log(`[聚源] 找到: ${stockName} (${stockCode}) - ${dividendYield.toFixed(2)}%`);
+            console.log(`[聚源] 找到: ${stockName} | 代码: ${stockCode || '缺失'} | 股息率: ${dividendYield.toFixed(2)}%`);
           }
         }
       }
@@ -259,6 +334,14 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
     if (stocks.length === 0) {
       console.error('[聚源] 警告：未解析出任何股票数据！');
       console.error('[聚源] 请检查API返回的数据结构');
+    }
+    
+    // 检查有多少股票缺少代码
+    const missingCodeCount = stocks.filter(s => s._needsCodeLookup).length;
+    if (missingCodeCount > 0) {
+      console.warn(`[聚源] 警告：${missingCodeCount} 只股票缺少股票代码`);
+      // 尝试通过股票名称查询获取代码
+      await fillMissingStockCodes(stocks, client);
     }
     
     // 2. 获取扣非净利润为正的股票列表
@@ -272,6 +355,15 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
     // 4. 按股息率排序，取前N只
     filteredStocks.sort((a, b) => b.dividend_yield - a.dividend_yield);
     const topStocks = filteredStocks.slice(0, topN);
+    
+    // 5. 清理内部标记
+    topStocks.forEach(stock => {
+      delete stock._needsCodeLookup;
+      // 如果代码仍然是 UNKNOWN_ 开头，尝试提取简短代码
+      if (stock.code.startsWith('UNKNOWN_')) {
+        stock.code = stock.name.substring(0, 6);
+      }
+    });
     
     console.log(`[聚源] 返回前${topN}只高股息率股票`);
     return topStocks;
