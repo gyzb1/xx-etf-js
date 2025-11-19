@@ -181,80 +181,92 @@ async function getProfitableStocks(stockNames) {
 }
 
 /**
- * 填充缺失的股票代码
+ * 从东方财富获取所有A股的代码映射（免费、稳定、完整）
  */
-async function fillMissingStockCodes(stocks, client) {
+async function getStockCodeMapping() {
   try {
-    console.log('[聚源] 开始填充缺失的股票代码...');
+    console.log('[东财] 获取A股代码映射...');
     
-    // 获取需要查询代码的股票名称
-    const stocksNeedingCode = stocks.filter(s => s._needsCodeLookup);
-    if (stocksNeedingCode.length === 0) return;
+    // 东方财富的A股列表API，包含完整的代码和名称
+    const url = 'http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f12,f14';
     
-    console.log(`[聚源] 需要查询 ${stocksNeedingCode.length} 只股票的代码`);
-    
-    // 使用股票名称列表查询
-    const stockNames = stocksNeedingCode.map(s => s.name);
-    const namesQuery = stockNames.slice(0, 20).join('、'); // 取前20个
-    const query = `A股市场股票简称为${namesQuery}的股票代码`;
-    
-    console.log(`[聚源] 查询: ${query.slice(0, 100)}...`);
-    
-    const result = await client.nlQuery({
-      query,
-      answerType: 2,
-      limit: stocksNeedingCode.length
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
     });
     
-    if (!result || !result.data) {
-      console.warn('[聚源] 无法获取股票代码映射');
-      return;
+    if (!res.ok) {
+      throw new Error(`东财API请求失败: ${res.status}`);
+    }
+    
+    const data = await res.json();
+    if (!data.data || !data.data.diff) {
+      throw new Error('东财API返回数据格式错误');
     }
     
     // 建立名称到代码的映射
     const nameToCode = new Map();
-    for (const group of result.data) {
-      if (!group.valueInfo) continue;
-      
-      console.log(`[聚源] 处理代码组: ${group.indicatorEngName}`);
-      
-      for (const item of group.valueInfo) {
-        const name = item.secuAbbr || item.securityName || item.security_abbreviation || '';
-        const code = item.prod_code || 
-                    item.prodCode || 
-                    item.security_code || 
-                    item.securityCode ||
-                    item.secuCode || 
-                    item.innerCode || 
-                    item.stockCode || 
-                    item.code ||
-                    '';
-        
-        if (name && code) {
-          // 转换为字符串并清理
-          const codeStr = String(code).trim();
-          nameToCode.set(name, codeStr);
-          console.log(`[聚源] 映射: ${name} -> ${codeStr}`);
-        }
+    for (const item of data.data.diff) {
+      if (item.f12 && item.f14) {
+        nameToCode.set(item.f14, item.f12); // f14=名称, f12=代码
       }
     }
     
-    console.log(`[聚源] 建立了 ${nameToCode.size} 个股票的代码映射`);
+    console.log(`[东财] 获取到 ${nameToCode.size} 只股票的代码映射`);
+    return nameToCode;
+    
+  } catch (error) {
+    console.error('[东财] 获取代码映射失败:', error.message);
+    return new Map();
+  }
+}
+
+/**
+ * 填充缺失的股票代码（使用东方财富数据）
+ */
+async function fillMissingStockCodes(stocks) {
+  try {
+    console.log('[代码填充] 开始填充缺失的股票代码...');
+    
+    // 获取需要查询代码的股票名称
+    const stocksNeedingCode = stocks.filter(s => s._needsCodeLookup);
+    if (stocksNeedingCode.length === 0) {
+      console.log('[代码填充] 无需填充');
+      return;
+    }
+    
+    console.log(`[代码填充] 需要填充 ${stocksNeedingCode.length} 只股票的代码`);
+    
+    // 从东方财富获取完整的代码映射
+    const nameToCode = await getStockCodeMapping();
+    
+    if (nameToCode.size === 0) {
+      console.warn('[代码填充] 未获取到代码映射，跳过填充');
+      return;
+    }
     
     // 填充代码
     let filledCount = 0;
     for (const stock of stocks) {
-      if (stock._needsCodeLookup && nameToCode.has(stock.name)) {
-        stock.code = nameToCode.get(stock.name);
-        delete stock._needsCodeLookup;
-        filledCount++;
+      if (stock._needsCodeLookup) {
+        const code = nameToCode.get(stock.name);
+        if (code) {
+          stock.code = code;
+          delete stock._needsCodeLookup;
+          filledCount++;
+          console.log(`[代码填充] ${stock.name} -> ${code}`);
+        } else {
+          console.warn(`[代码填充] 未找到 ${stock.name} 的代码`);
+          stock.code = stock.name.substring(0, 6); // 后备方案
+        }
       }
     }
     
-    console.log(`[聚源] 成功填充 ${filledCount} 个股票代码`);
+    console.log(`[代码填充] 成功填充 ${filledCount}/${stocksNeedingCode.length} 个股票代码`);
     
   } catch (error) {
-    console.error('[聚源] 填充股票代码失败:', error.message);
+    console.error('[代码填充] 填充失败:', error.message);
   }
 }
 
@@ -356,8 +368,8 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
     const missingCodeCount = stocks.filter(s => s._needsCodeLookup).length;
     if (missingCodeCount > 0) {
       console.warn(`[聚源] 警告：${missingCodeCount} 只股票缺少股票代码`);
-      // 尝试通过股票名称查询获取代码
-      await fillMissingStockCodes(stocks, client);
+      // 使用东方财富API填充股票代码（免费、稳定、完整）
+      await fillMissingStockCodes(stocks);
     }
     
     // 2. 获取扣非净利润为正的股票列表
