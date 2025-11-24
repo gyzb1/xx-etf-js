@@ -7,11 +7,20 @@ interface Stock {
   name: string
   dividend_yield: number
   weight: number
+  daily_change?: number | null
+  latest_price?: number | null
+}
+
+interface NavPoint {
+  date: string
+  nav: number
+  return: number
 }
 
 interface Portfolio {
   portfolio_id: string
   creation_time: string
+  update_time?: string
   strategy_version: string
   stock_count: number
   stock_pool_size?: number
@@ -24,7 +33,10 @@ interface Portfolio {
   }
   avg_dividend_yield: number
   weight_method: string
+  latest_nav?: number | null
+  fund_daily_change?: number | null
   stocks: Stock[]
+  nav_curve?: NavPoint[]
 }
 
 export default function Home() {
@@ -36,7 +48,7 @@ export default function Home() {
     setLoading(true)
     setError(null)
     try {
-      // 使用新的聚源API端点
+      // 使用聚源API端点
       const res = await fetch('/api/portfolio?topN=50')
       if (!res.ok) {
         // 尝试获取详细错误信息
@@ -142,9 +154,34 @@ export default function Home() {
               }}>
                 <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>📅 更新时间</div>
                 <div style={{ fontSize: '18px', fontWeight: 600, color: '#2d3748' }}>
-                  {portfolio.creation_time}
+                  {portfolio.update_time || portfolio.creation_time}
                 </div>
               </div>
+              
+              {portfolio.latest_nav !== null && portfolio.latest_nav !== undefined && (
+                <div style={{
+                  padding: '24px',
+                  backgroundColor: '#fff',
+                  borderRadius: '16px',
+                  boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+                  textAlign: 'center'
+                }}>
+                  <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>💰 最新净值</div>
+                  <div style={{ fontSize: '32px', fontWeight: 700, color: '#2d3748' }}>
+                    {portfolio.latest_nav.toFixed(4)}
+                  </div>
+                  {portfolio.fund_daily_change !== null && portfolio.fund_daily_change !== undefined && (
+                    <div style={{ 
+                      fontSize: '16px', 
+                      fontWeight: 600,
+                      color: portfolio.fund_daily_change >= 0 ? '#48bb78' : '#f56565',
+                      marginTop: '8px'
+                    }}>
+                      今日 {portfolio.fund_daily_change >= 0 ? '+' : ''}{portfolio.fund_daily_change.toFixed(2)}%
+                    </div>
+                  )}
+                </div>
+              )}
               
               <div style={{
                 padding: '24px',
@@ -249,6 +286,113 @@ export default function Home() {
                 </div>
               </div>
             </div>
+
+            {/* Nav Curve Chart */}
+            {portfolio.nav_curve && portfolio.nav_curve.length > 0 && (
+              <div style={{
+                backgroundColor: '#fff',
+                borderRadius: '16px',
+                padding: '24px',
+                marginBottom: '30px',
+                boxShadow: '0 4px 20px rgba(0,0,0,0.1)'
+              }}>
+                <h2 style={{ 
+                  fontSize: '20px', 
+                  fontWeight: 600, 
+                  marginBottom: '20px',
+                  color: '#2d3748',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px'
+                }}>
+                  📊 净值曲线（最近30天）
+                </h2>
+                <div style={{ position: 'relative', height: '350px' }}>
+                  <svg width="100%" height="100%" viewBox="0 0 800 350" preserveAspectRatio="xMidYMid meet">
+                    {/* 计算坐标 */}
+                    {(() => {
+                      const navs = portfolio.nav_curve!.map(p => p.nav);
+                      const minNav = Math.min(...navs, 1.0);
+                      const maxNav = Math.max(...navs, 1.0);
+                      const range = maxNav - minNav || 0.1;
+                      const padding = range * 0.1;
+                      
+                      const yMin = minNav - padding;
+                      const yMax = maxNav + padding;
+                      const yRange = yMax - yMin;
+                      
+                      // 计算基准线 1.0 的 Y 坐标
+                      const baselineY = 270 - ((1.0 - yMin) / yRange) * 220;
+                      
+                      const points = portfolio.nav_curve!.map((point, i) => {
+                        const x = 60 + (i / (portfolio.nav_curve!.length - 1)) * 680;
+                        const y = 270 - ((point.nav - yMin) / yRange) * 220;
+                        return `${x},${y}`;
+                      }).join(' ');
+                      
+                      const lastPoint = portfolio.nav_curve![portfolio.nav_curve!.length - 1];
+                      const totalReturn = lastPoint.return;
+                      const lineColor = totalReturn >= 0 ? '#48bb78' : '#f56565';
+                      
+                      // 选择要显示的日期标签（每隔几天显示一个）
+                      const dateInterval = Math.ceil(portfolio.nav_curve!.length / 6);
+                      const dateLabels = portfolio.nav_curve!.filter((_, i) => i % dateInterval === 0 || i === portfolio.nav_curve!.length - 1);
+                      
+                      return (
+                        <>
+                          {/* 背景网格 */}
+                          <line x1="60" y1="270" x2="740" y2="270" stroke="#e2e8f0" strokeWidth="1" />
+                          <line x1="60" y1="220" x2="740" y2="220" stroke="#e2e8f0" strokeWidth="1" />
+                          <line x1="60" y1="170" x2="740" y2="170" stroke="#e2e8f0" strokeWidth="1" />
+                          <line x1="60" y1="120" x2="740" y2="120" stroke="#e2e8f0" strokeWidth="1" />
+                          <line x1="60" y1="70" x2="740" y2="70" stroke="#e2e8f0" strokeWidth="1" />
+                          
+                          {/* 基准线 1.0 */}
+                          <line x1="60" y1={baselineY} x2="740" y2={baselineY} stroke="#cbd5e0" strokeWidth="2" strokeDasharray="5,5" />
+                          <text x="45" y={baselineY + 4} fontSize="11" fill="#718096" textAnchor="end" fontWeight="600">1.00</text>
+                          
+                          {/* 净值曲线 */}
+                          <polyline
+                            points={points}
+                            fill="none"
+                            stroke={lineColor}
+                            strokeWidth="3"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                          
+                          {/* Y轴标签 */}
+                          <text x="45" y="275" fontSize="11" fill="#666" textAnchor="end">{yMin.toFixed(3)}</text>
+                          <text x="45" y="75" fontSize="11" fill="#666" textAnchor="end">{yMax.toFixed(3)}</text>
+                          
+                          {/* X轴日期标签 */}
+                          {dateLabels.map((point, idx) => {
+                            const originalIndex = portfolio.nav_curve!.indexOf(point);
+                            const x = 60 + (originalIndex / (portfolio.nav_curve!.length - 1)) * 680;
+                            const dateStr = point.date.slice(5); // 只显示 MM-DD
+                            return (
+                              <text key={idx} x={x} y="295" fontSize="10" fill="#666" textAnchor="middle">
+                                {dateStr}
+                              </text>
+                            );
+                          })}
+                          
+                          {/* 收益率标签 */}
+                          <text x="400" y="30" fontSize="16" fill={lineColor} textAnchor="middle" fontWeight="600">
+                            累计收益: {totalReturn >= 0 ? '+' : ''}{totalReturn.toFixed(2)}%
+                          </text>
+                          
+                          {/* 最新净值标签 */}
+                          <text x="400" y="50" fontSize="13" fill="#666" textAnchor="middle">
+                            最新净值: {lastPoint.nav.toFixed(4)}
+                          </text>
+                        </>
+                      );
+                    })()}
+                  </svg>
+                </div>
+              </div>
+            )}
 
             {/* Holdings Table */}
             <div style={{

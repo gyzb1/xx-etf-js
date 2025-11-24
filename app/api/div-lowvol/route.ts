@@ -137,9 +137,18 @@ async function getStocksWithMarketCap(): Promise<Array<{ code: string; name: str
   }
 }
 
-// 聚源 API - 获取股息率数据
-async function getDividendYieldFromJuyuan(client: JuyuanClient, stockNames: string[]): Promise<Map<string, number>> {
+// 聚源 API - 获取股息率数据（返回 Map<股票代码, 股息率>）
+async function getDividendYieldFromJuyuan(client: JuyuanClient, stocks: Array<{ code: string; name: string }>): Promise<Map<string, number>> {
   const dividendMap = new Map<string, number>()
+  
+  // 创建名称到代码的映射（同时创建代码到名称的映射）
+  const nameToCode = new Map<string, string>()
+  const codeToName = new Map<string, string>()
+  const stockNames = stocks.map(s => {
+    nameToCode.set(s.name, s.code)
+    codeToName.set(s.code, s.name)
+    return s.name
+  })
   
   // 批量查询股息率
   const query = `A股市场滚动股息率TTM最高的前${Math.min(stockNames.length, 1000)}只股票`
@@ -152,6 +161,8 @@ async function getDividendYieldFromJuyuan(client: JuyuanClient, stockNames: stri
   }
 
   const nameSet = new Set(stockNames)
+  let matchCount = 0
+  let sampleCount = 0
   
   for (const group of result.data) {
     if (!group.valueInfo) continue
@@ -160,17 +171,51 @@ async function getDividendYieldFromJuyuan(client: JuyuanClient, stockNames: stri
     if (!indicatorName.toLowerCase().includes('dividend')) continue
 
     for (const item of group.valueInfo) {
-      const name = item.secuAbbr || ''
-      if (!name || !nameSet.has(name)) continue
+      const juyuanName = item.secuAbbr || ''
+      const juyuanCode = item.secuCode || item.ticker_symbol || item.ticker || ''
       
-      const dy = Number(item.dividend_ratio_ttm ?? item.dividend_yield ?? 0)
-      if (!isNaN(dy) && dy > 0) {
-        dividendMap.set(name, dy)
+      // 打印前3个样本看看聚源返回的字段
+      if (sampleCount < 3) {
+        console.log(`[聚源] 样本 ${sampleCount + 1}:`, JSON.stringify(item).slice(0, 200))
+        sampleCount++
+      }
+      
+      if (!juyuanName) continue
+      
+      // 优先使用聚源返回的股票代码
+      let code = juyuanCode
+      
+      // 如果聚源没有返回代码，尝试通过名称匹配
+      if (!code) {
+        // 尝试精确匹配
+        code = nameToCode.get(juyuanName)
+        
+        // 如果精确匹配失败，尝试模糊匹配（去除空格）
+        if (!code) {
+          const normalizedJuyuanName = juyuanName.replace(/\s+/g, '')
+          nameToCode.forEach((c, name) => {
+            if (!code && name.replace(/\s+/g, '') === normalizedJuyuanName) {
+              code = c
+            }
+          })
+        }
+      }
+      
+      if (code) {
+        const dy = Number(item.dividend_ratio_ttm ?? item.dividend_yield ?? 0)
+        if (!isNaN(dy) && dy > 0) {
+          dividendMap.set(code, dy)
+          matchCount++
+          
+          if (matchCount <= 3) {
+            console.log(`[聚源] 匹配成功: 名称="${juyuanName}", 代码=${code}, 股息率=${dy}%`)
+          }
+        }
       }
     }
   }
 
-  console.log(`[聚源] 获取到 ${dividendMap.size} 只股票的股息率数据`)
+  console.log(`[聚源] 获取到 ${dividendMap.size} 只股票的股息率数据，成功匹配 ${matchCount} 只`)
   return dividendMap
 }
 
@@ -204,11 +249,10 @@ export async function GET(request: NextRequest) {
       // 3a. 尝试用聚源查询股息率
       try {
         const client = createJuyuanClientFromEnv()
-        const stockNames = largeCapStocks.map(s => s.name)
-        const dividendMap = await getDividendYieldFromJuyuan(client, stockNames)
+        const dividendMap = await getDividendYieldFromJuyuan(client, largeCapStocks)
         
         for (const stock of largeCapStocks) {
-          const dividendYield = dividendMap.get(stock.name)
+          const dividendYield = dividendMap.get(stock.code)
           if (dividendYield && dividendYield > 0) {
             stocksWithDividend.push({
               code: stock.code,
@@ -278,8 +322,14 @@ export async function GET(request: NextRequest) {
     const weight = 100 / highDividendStocks.length
     let totalDividendYield = 0
 
-    const stocks = highDividendStocks.map((s) => {
+    const stocks = highDividendStocks.map((s, idx) => {
       totalDividendYield += s.dividend_yield
+      
+      // 打印前3个样本
+      if (idx < 3) {
+        console.log(`[div-lowvol] 样本 ${idx + 1}: code=${s.code}, name=${s.name}, dividend=${s.dividend_yield}`)
+      }
+      
       return {
         code: s.code,
         name: s.name,

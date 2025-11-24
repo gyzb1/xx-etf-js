@@ -181,6 +181,73 @@ async function getProfitableStocks(stockNames) {
 }
 
 /**
+ * 从东财根据股票名称查询代码
+ * 使用搜索接口，一次查一只
+ */
+async function getStockCodeByName(stockName) {
+  try {
+    // 使用东财搜索接口
+    const url = `http://searchapi.eastmoney.com/api/suggest/get?input=${encodeURIComponent(stockName)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=5`;
+    const res = await fetch(url);
+    
+    if (!res.ok) return null;
+    
+    const data = await res.json();
+    if (data.QuotationCodeTable && data.QuotationCodeTable.Data) {
+      for (const item of data.QuotationCodeTable.Data) {
+        // 匹配股票名称
+        if (item.Name === stockName || item.SecurityTypeName === stockName) {
+          // 返回代码（去掉市场后缀）
+          const code = item.Code.split('.')[0];
+          return code;
+        }
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * 批量获取股票代码
+ */
+async function batchGetStockCodes(stockNames) {
+  console.log(`[东财] 开始批量查询 ${stockNames.length} 只股票的代码...`);
+  
+  const nameToCode = new Map();
+  let successCount = 0;
+  
+  // 为了避免请求过快，每次查询间隔50ms
+  for (let i = 0; i < stockNames.length; i++) {
+    const name = stockNames[i];
+    const code = await getStockCodeByName(name);
+    
+    if (code) {
+      nameToCode.set(name, code);
+      successCount++;
+      
+      if (successCount <= 5) {
+        console.log(`[东财] ✓ ${name} → ${code}`);
+      }
+    } else {
+      if (i < 3) {
+        console.log(`[东财] ✗ ${name} → 未找到`);
+      }
+    }
+    
+    // 间隔50ms
+    if (i < stockNames.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+  
+  console.log(`[东财] 批量查询完成: 成功 ${successCount}/${stockNames.length}`);
+  return nameToCode;
+}
+
+/**
  * 从聚源AIDB获取高股息率股票
  * 并筛选出扣非净利润为正的股票
  */
@@ -220,8 +287,7 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
       if (!indicatorName.includes('dividend')) continue;
       
       for (const item of group.valueInfo) {
-        const stockName = item.secuAbbr || '';
-        const stockCode = item.secuCode || item.innerCode || '';
+        const stockName = item.secu_abbr || item.secuAbbr || '';
         
         // 获取股息率（尝试多个可能的字段名）
         const dividendYield = Number(
@@ -234,12 +300,10 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
         
         if (stockName && dividendYield > 0) {
           stocks.push({
-            code: stockCode || stockName,
+            code: stockName, // 暂时用名称，后面批量查询代码
             name: stockName,
             dividend_yield: dividendYield,
           });
-          
-          console.log(`[聚源] 找到: ${stockName} - ${dividendYield.toFixed(2)}%`);
         }
       }
     }
@@ -259,6 +323,19 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
     const topStocks = filteredStocks.slice(0, topN);
     
     console.log(`[聚源] 返回前${topN}只高股息率股票`);
+    
+    // 5. 批量查询这些股票的代码
+    const stockNamesToQuery = topStocks.map(s => s.name);
+    const nameToCode = await batchGetStockCodes(stockNamesToQuery);
+    
+    // 6. 更新股票代码
+    for (const stock of topStocks) {
+      const code = nameToCode.get(stock.name);
+      if (code) {
+        stock.code = code;
+      }
+    }
+    
     return topStocks;
     
   } catch (error) {
@@ -269,25 +346,445 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
 }
 
 /**
+ * 从聚源获取单只股票从年初到现在的历史价格
+ */
+async function getSingleStockHistory(client, stockName, isFirstStock = false) {
+  try {
+    // 尝试多种查询方式
+    const queries = [
+      `查询${stockName}2025年以来的每日收盘价`,
+      `${stockName}2025年至今每日收盘价`,
+      `查询${stockName}最近200个交易日的收盘价`
+    ];
+    
+    let result = null;
+    let usedQuery = '';
+    
+    for (const query of queries) {
+      try {
+        result = await client.nlQuery({
+          query,
+          answerType: 2,
+          limit: 300
+        });
+        
+        if (result && result.data && result.data.length > 0) {
+          usedQuery = query;
+          break;
+        }
+      } catch (err) {
+        continue;
+      }
+    }
+    
+    if (!result || !result.data) {
+      if (isFirstStock) {
+        console.log(`[聚源] ${stockName} 所有查询方式都失败`);
+      }
+      return { prices: [], latestChange: null };
+    }
+    
+    const prices = [];
+    let latestChange = null;
+    
+    for (const group of result.data) {
+      if (!group.valueInfo) continue;
+      
+      for (const item of group.valueInfo) {
+        // 打印第一只股票的第一条数据样本，用于调试
+        if (isFirstStock && prices.length === 0) {
+          console.log(`[聚源] ${stockName} 使用查询: ${usedQuery}`);
+          console.log(`[聚源] ${stockName} 数据样本:`, JSON.stringify(item));
+        }
+        
+        const closePrice = parseFloat(item.close_price || 0);
+        const date = item.endDate || item.end_date || item.trading_date || '';
+        
+        if (closePrice > 0 && date) {
+          prices.push({
+            date,
+            close: closePrice,
+          });
+        }
+      }
+    }
+    
+    // 按日期排序
+    prices.sort((a, b) => a.date.localeCompare(b.date));
+    
+    // 只保留2025年的数据
+    const prices2025 = prices.filter(p => p.date.startsWith('2025'));
+    
+    return { prices: prices2025, latestChange };
+    
+  } catch (error) {
+    console.log(`[聚源] ${stockName} 查询异常: ${error.message}`);
+    return { prices: [], latestChange: null };
+  }
+}
+
+/**
+ * 从聚源获取单只股票的最新涨跌幅
+ * 先尝试查询"最新涨跌幅"，如果失败则查询最近2天收盘价自己计算
+ */
+async function getStockDailyChange(client, stockName) {
+  try {
+    // 方法1：直接查询最新涨跌幅
+    let query = `查询${stockName}最新涨跌幅`;
+    let result = await client.nlQuery({
+      query,
+      answerType: 2,
+      limit: 5
+    });
+    
+    // 尝试从返回结果中提取涨跌幅
+    if (result && result.data) {
+      for (const group of result.data) {
+        if (!group.valueInfo) continue;
+        
+        for (const item of group.valueInfo) {
+          // 尝试多个可能的涨跌幅字段
+          let changeRate = null;
+          if (item.px_change_rate !== undefined && item.px_change_rate !== null && item.px_change_rate !== '') {
+            changeRate = parseFloat(item.px_change_rate);
+          } else if (item.change_rate !== undefined && item.change_rate !== null && item.change_rate !== '') {
+            changeRate = parseFloat(item.change_rate);
+          } else if (item.pct_chg !== undefined && item.pct_chg !== null && item.pct_chg !== '') {
+            changeRate = parseFloat(item.pct_chg);
+          } else if (item.issue_price_change_rate !== undefined && item.issue_price_change_rate !== null && item.issue_price_change_rate !== '') {
+            changeRate = parseFloat(item.issue_price_change_rate);
+          }
+          
+          if (changeRate !== null && !isNaN(changeRate)) {
+            return changeRate;
+          }
+        }
+      }
+    }
+    
+    // 方法2：如果方法1失败，查询最近2个交易日的收盘价，自己计算
+    query = `查询${stockName}最近2个交易日的收盘价`;
+    result = await client.nlQuery({
+      query,
+      answerType: 2,
+      limit: 10
+    });
+    
+    if (!result || !result.data) {
+      return null;
+    }
+    
+    const prices = [];
+    for (const group of result.data) {
+      if (!group.valueInfo) continue;
+      
+      for (const item of group.valueInfo) {
+        const closePrice = parseFloat(item.close_price || 0);
+        const date = item.endDate || item.end_date || item.trading_date || '';
+        
+        if (closePrice > 0 && date) {
+          prices.push({
+            date,
+            close: closePrice,
+          });
+        }
+      }
+    }
+    
+    // 按日期排序
+    prices.sort((a, b) => a.date.localeCompare(b.date));
+    
+    // 如果有至少2个交易日的数据，计算涨跌幅
+    if (prices.length >= 2) {
+      const latestPrice = prices[prices.length - 1];
+      const prevPrice = prices[prices.length - 2];
+      
+      if (prevPrice.close > 0) {
+        const changeRate = ((latestPrice.close / prevPrice.close - 1) * 100);
+        return changeRate;
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * 从聚源获取股票从年初到现在的历史价格
+ * 由于聚源查询不返回股票代码，需要逐只查询
+ */
+async function getStockHistoryPricesFromJuyuan(stockCodes, stockNames) {
+  const currentYear = new Date().getFullYear();
+  console.log(`[聚源] 开始获取 ${stockCodes.length} 只股票从${currentYear}年初至今的历史价格...`);
+  
+  const client = createJuyuanClient();
+  const priceData = new Map(); // code -> [{date, close}, ...]
+  const changeData = new Map(); // code -> latest_change (从历史数据计算)
+  
+  const startTime = Date.now();
+  // 获取所有股票的年初至今历史价格（用于净值曲线）
+  const historyLimit = Math.min(50, stockCodes.length); // 查询所有50只
+  
+  for (let i = 0; i < historyLimit; i++) {
+    const code = stockCodes[i];
+    const name = stockNames[i];
+    
+    try {
+      const { prices } = await getSingleStockHistory(client, name, i === 0);
+      
+      if (prices.length > 0) {
+        priceData.set(code, prices);
+        
+        // 计算上一个交易日（昨天收盘）的涨跌幅
+        // prices[length-1] = 最新交易日（可能是今天或昨天）
+        // prices[length-2] = 上一个交易日
+        // prices[length-3] = 上上个交易日
+        // 我们要的是：上一个交易日相对于上上个交易日的涨跌幅
+        let dailyChange = null;
+        if (prices.length >= 3) {
+          // 如果有3个以上交易日，取倒数第2个相对于倒数第3个
+          const yesterdayPrice = prices[prices.length - 2];
+          const dayBeforePrice = prices[prices.length - 3];
+          if (dayBeforePrice.close > 0 && yesterdayPrice.close > 0) {
+            dailyChange = ((yesterdayPrice.close / dayBeforePrice.close - 1) * 100);
+          }
+        } else if (prices.length === 2) {
+          // 如果只有2个交易日，取最新的相对于前一个
+          const latestPrice = prices[prices.length - 1];
+          const prevPrice = prices[prices.length - 2];
+          if (prevPrice.close > 0 && latestPrice.close > 0) {
+            dailyChange = ((latestPrice.close / prevPrice.close - 1) * 100);
+          }
+        }
+        changeData.set(code, dailyChange);
+        
+        if ((i + 1) % 5 === 0 || i === historyLimit - 1) {
+          const changeStr = dailyChange !== null ? `昨日涨跌 ${dailyChange.toFixed(2)}%` : '无涨跌幅';
+          console.log(`[聚源] 进度: ${i + 1}/${historyLimit} (${Math.round((i + 1) / historyLimit * 100)}%) - ${name}: ${prices.length} 个交易日, ${changeStr}`);
+        }
+      } else {
+        console.log(`[聚源] ✗ ${i + 1}/${historyLimit} ${name}: 无数据`);
+        changeData.set(code, null);
+      }
+    } catch (error) {
+      console.log(`[聚源] ✗ ${i + 1}/${historyLimit} ${name}: 查询出错`);
+      changeData.set(code, null);
+    }
+    
+    // 间隔100ms，避免请求过快
+    if (i < historyLimit - 1) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  
+  const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[聚源] 完成: 获取到 ${priceData.size}/${historyLimit} 只股票的历史价格，总耗时 ${totalElapsed} 秒`);
+  
+  return { priceData, changeData };
+}
+
+/**
+ * 判断是否是交易日且已收盘
+ * A股交易时间：周一至周五 9:30-15:00
+ */
+function isTradingDayClosed() {
+  const now = new Date();
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+  const day = now.getDay(); // 0=周日, 1-5=周一至周五, 6=周六
+  
+  // 周末不是交易日
+  if (day === 0 || day === 6) {
+    return false;
+  }
+  
+  // 交易日，判断是否已收盘（15:00之后算已收盘）
+  if (hour > 15 || (hour === 15 && minute >= 0)) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
+ * 计算组合净值曲线
+ */
+function calculatePortfolioNav(stocks, priceData) {
+  console.log('[计算] 开始计算组合净值曲线...');
+  
+  // 获取所有日期
+  const allDates = new Set();
+  for (const prices of priceData.values()) {
+    prices.forEach(p => allDates.add(p.date));
+  }
+  
+  let sortedDates = Array.from(allDates).sort();
+  console.log(`[计算] 共 ${sortedDates.length} 个交易日`);
+  
+  if (sortedDates.length === 0) {
+    return [];
+  }
+  
+  // 如果今天还在交易中（未收盘），移除最后一个交易日
+  const isClosed = isTradingDayClosed();
+  const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
+  const latestDate = sortedDates[sortedDates.length - 1];
+  
+  if (!isClosed && latestDate === today) {
+    console.log(`[计算] 今日尚未收盘，净值曲线截止到昨天 (${sortedDates[sortedDates.length - 2]})`);
+    sortedDates = sortedDates.slice(0, -1);
+  } else {
+    console.log(`[计算] 净值曲线截止到 ${latestDate}`);
+  }
+  
+  if (sortedDates.length === 0) {
+    return [];
+  }
+  
+  // 计算每日净值（基准 1.0，累计计算）
+  const navCurve = [];
+  const weight = 1 / stocks.length; // 等权重
+  let cumulativeNav = 1.0; // 初始净值 1.0
+  
+  for (let i = 0; i < sortedDates.length; i++) {
+    const date = sortedDates[i];
+    const prevDate = i > 0 ? sortedDates[i - 1] : null;
+    
+    let dailyReturn = 0;
+    let validStocks = 0;
+    
+    for (const stock of stocks) {
+      const prices = priceData.get(stock.code);
+      if (!prices || prices.length === 0) continue;
+      
+      const priceOnDate = prices.find(p => p.date === date);
+      
+      if (i === 0) {
+        // 第一天，收益率为 0
+        validStocks++;
+      } else {
+        // 计算相对于前一天的涨跌幅
+        const pricePrev = prices.find(p => p.date === prevDate);
+        
+        if (priceOnDate && pricePrev && pricePrev.close > 0) {
+          const stockReturn = (priceOnDate.close / pricePrev.close - 1);
+          dailyReturn += stockReturn * weight;
+          validStocks++;
+        }
+      }
+    }
+    
+    if (validStocks > 0) {
+      // 累计净值 = 前一日净值 × (1 + 当日收益率)
+      if (i > 0) {
+        cumulativeNav = cumulativeNav * (1 + dailyReturn);
+      }
+      
+      const totalReturn = (cumulativeNav - 1.0) * 100;
+      
+      navCurve.push({
+        date,
+        nav: Number(cumulativeNav.toFixed(6)),
+        return: Number(totalReturn.toFixed(2)),
+      });
+    }
+  }
+  
+  console.log(`[计算] 净值曲线计算完成，共 ${navCurve.length} 个数据点`);
+  return navCurve;
+}
+
+/**
  * 构建等权重组合
  */
-function buildPortfolio(stocks, topN) {
+async function buildPortfolio(stocks, topN) {
   const weight = 100 / stocks.length;
   const totalDividendYield = stocks.reduce((sum, s) => sum + s.dividend_yield, 0);
   const avgDividendYield = totalDividendYield / stocks.length;
   
-  const portfolioStocks = stocks.map(stock => ({
-    code: stock.code,
-    name: stock.name,
-    dividend_yield: Number(stock.dividend_yield.toFixed(2)),
-    weight: Number(weight.toFixed(2)),
-  }));
-  
   const portfolioId = `DIV_JUYUAN_${new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 15)}`;
+  
+  // 获取历史价格并计算净值曲线
+  let navCurve = [];
+  let priceData = new Map();
+  let changeData = new Map();
+  let portfolioStocks = [];
+  
+  try {
+    const validStocks = stocks.filter(s => s.code && s.code.length === 6);
+    const stockCodes = validStocks.map(s => s.code);
+    const stockNames = validStocks.map(s => s.name);
+    console.log(`[计算] 准备获取 ${stockCodes.length} 只股票的历史数据`);
+    
+    const result = await getStockHistoryPricesFromJuyuan(stockCodes, stockNames);
+    priceData = result.priceData;
+    changeData = result.changeData;
+    
+    if (priceData.size > 0) {
+      navCurve = calculatePortfolioNav(validStocks, priceData);
+      
+      // 为每只股票添加今日涨跌幅（使用聚源返回的数据）
+      portfolioStocks = validStocks.map(stock => {
+        const prices = priceData.get(stock.code);
+        const daily_change = changeData.get(stock.code);
+        let latest_price = null;
+        
+        if (prices && prices.length > 0) {
+          latest_price = prices[prices.length - 1].close;
+        }
+        
+        return {
+          code: stock.code,
+          name: stock.name,
+          dividend_yield: Number(stock.dividend_yield.toFixed(2)),
+          weight: Number(weight.toFixed(2)),
+          daily_change: daily_change !== null && daily_change !== undefined ? Number(daily_change.toFixed(2)) : null,
+          latest_price,
+        };
+      });
+    } else {
+      console.warn('[计算] 未获取到历史价格数据，跳过净值曲线计算');
+      portfolioStocks = stocks.map(stock => ({
+        code: stock.code,
+        name: stock.name,
+        dividend_yield: Number(stock.dividend_yield.toFixed(2)),
+        weight: Number(weight.toFixed(2)),
+        daily_change: null,
+        latest_price: null,
+      }));
+    }
+  } catch (error) {
+    console.warn('[计算] 净值曲线计算失败:', error.message);
+    portfolioStocks = stocks.map(stock => ({
+      code: stock.code,
+      name: stock.name,
+      dividend_yield: Number(stock.dividend_yield.toFixed(2)),
+      weight: Number(weight.toFixed(2)),
+      daily_change: null,
+      latest_price: null,
+    }));
+  }
+  
+  // 计算基金今日涨跌幅
+  let fund_daily_change = null;
+  let latest_nav = null;
+  let prev_nav = null;
+  
+  if (navCurve.length >= 2) {
+    latest_nav = navCurve[navCurve.length - 1].nav;
+    prev_nav = navCurve[navCurve.length - 2].nav;
+    fund_daily_change = Number((((latest_nav / prev_nav - 1) * 100).toFixed(2)));
+  } else if (navCurve.length === 1) {
+    latest_nav = navCurve[0].nav;
+    fund_daily_change = 0;
+  }
   
   return {
     portfolio_id: portfolioId,
     creation_time: new Date().toISOString().slice(0, 19).replace('T', ' '),
+    update_time: new Date().toISOString().slice(0, 19).replace('T', ' '), // 更新时间
     strategy_version: 'v2-juyuan',
     stock_count: portfolioStocks.length,
     selection_criteria: {
@@ -298,7 +795,10 @@ function buildPortfolio(stocks, topN) {
     },
     avg_dividend_yield: Number(avgDividendYield.toFixed(2)),
     weight_method: 'equal',
+    latest_nav, // 最新净值
+    fund_daily_change, // 基金今日涨跌幅
     stocks: portfolioStocks,
+    nav_curve: navCurve, // 净值曲线
   };
 }
 
@@ -325,15 +825,17 @@ export async function GET(request) {
     }
     
     // 构建组合
-    const portfolio = buildPortfolio(stocks, topN);
+    const portfolio = await buildPortfolio(stocks, topN);
     
     console.log(`[API] 组合构建成功:`);
     console.log(`  - 股票数量: ${portfolio.stock_count}`);
     console.log(`  - 平均股息率: ${portfolio.avg_dividend_yield}%`);
     console.log(`  - 前5只股票:`);
-    portfolio.stocks.slice(0, 5).forEach((s, i) => {
-      console.log(`    ${i + 1}. ${s.name} - ${s.dividend_yield}%`);
-    });
+    if (portfolio.stocks && portfolio.stocks.length > 0) {
+      portfolio.stocks.slice(0, 5).forEach((s, i) => {
+        console.log(`    ${i + 1}. ${s.name} - ${s.dividend_yield}%`);
+      });
+    }
     console.log('='.repeat(70) + '\n');
     
     return NextResponse.json(portfolio);
