@@ -5,6 +5,10 @@
 
 import { NextResponse } from 'next/server';
 
+// 强制动态渲染
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
 // 聚源客户端（内联实现，避免模块导入问题）
 class JuyuanAIDBClient {
   constructor({ appKey, appSecret, env = 'prd' }) {
@@ -582,6 +586,14 @@ async function getStockHistoryPricesFromJuyuan(stockCodes, stockNames) {
   const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`[聚源] 完成: 获取到 ${priceData.size}/${historyLimit} 只股票的历史价格，总耗时 ${totalElapsed} 秒`);
   
+  // 打印每只股票的数据量
+  if (priceData.size > 0) {
+    console.log('[聚源] 各股票数据量:');
+    for (const [code, prices] of priceData.entries()) {
+      console.log(`  ${code}: ${prices.length} 个交易日`);
+    }
+  }
+  
   return { priceData, changeData };
 }
 
@@ -693,6 +705,16 @@ function calculatePortfolioNav(stocks, priceData) {
   }
   
   console.log(`[计算] 净值曲线计算完成，共 ${navCurve.length} 个数据点`);
+  
+  if (navCurve.length > 0) {
+    const firstPoint = navCurve[0];
+    const lastPoint = navCurve[navCurve.length - 1];
+    console.log(`[计算] 起始: ${firstPoint.date} NAV=${firstPoint.nav}`);
+    console.log(`[计算] 结束: ${lastPoint.date} NAV=${lastPoint.nav} 收益=${lastPoint.return}%`);
+  } else {
+    console.warn('[计算] ⚠️ 净值曲线为空！');
+  }
+  
   return navCurve;
 }
 
