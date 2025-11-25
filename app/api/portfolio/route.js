@@ -795,8 +795,12 @@ async function buildPortfolio(stocks, topN) {
     priceData = result.priceData;
     changeData = result.changeData;
     
+    console.log(`[计算] 获取到 ${priceData.size} 只股票的历史价格数据`);
+    
     if (priceData.size > 0) {
+      console.log('[计算] 开始计算净值曲线...');
       navCurve = calculatePortfolioNav(validStocks, priceData);
+      console.log(`[计算] 净值曲线计算完成，共 ${navCurve.length} 个数据点`);
       
       // 为每只股票添加今日涨跌幅（使用聚源返回的数据）
       portfolioStocks = validStocks.map(stock => {
