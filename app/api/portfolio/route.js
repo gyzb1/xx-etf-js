@@ -28,11 +28,13 @@ class JuyuanAIDBClient {
     this.tokenExpiresAt = null;
   }
 
-  async getAccessToken() {
-    if (this.accessToken && this.tokenExpiresAt && new Date() < this.tokenExpiresAt) {
+  async getAccessToken(forceRefresh = false) {
+    // 如果强制刷新，或者 token 不存在/已过期，则获取新 token
+    if (!forceRefresh && this.accessToken && this.tokenExpiresAt && new Date() < this.tokenExpiresAt) {
       return this.accessToken;
     }
 
+    console.log('[聚源] 获取新的 access token...');
     const credentials = Buffer.from(`${this.appKey}:${this.appSecret}`, 'utf8').toString('base64');
 
     const res = await fetch(this.authUrl, {
@@ -52,11 +54,18 @@ class JuyuanAIDBClient {
     const data = await res.json();
     this.accessToken = data.access_token;
     const expiresIn = data.expires_in || 3600;
-    this.tokenExpiresAt = new Date(Date.now() + (expiresIn - 300) * 1000);
+    
+    // 提前刷新时间：取 expiresIn 的 10% 或 60秒，取较小值
+    const refreshBuffer = Math.min(Math.floor(expiresIn * 0.1), 60);
+    const effectiveExpiry = Math.max(expiresIn - refreshBuffer, 60); // 至少保留60秒
+    
+    this.tokenExpiresAt = new Date(Date.now() + effectiveExpiry * 1000);
+    
+    console.log(`[聚源] Token 获取成功，原始有效期 ${expiresIn}秒，实际使用 ${effectiveExpiry}秒，过期时间 ${this.tokenExpiresAt.toLocaleTimeString()}`);
     return this.accessToken;
   }
 
-  async nlQuery({ query, answerType = 2, limit = 10 }) {
+  async nlQuery({ query, answerType = 2, limit = 10 }, retryCount = 0) {
     const url = `${this.baseUrl}/nl_query`;
     const token = await this.getAccessToken();
     
@@ -77,6 +86,17 @@ class JuyuanAIDBClient {
 
     if (!res.ok) {
       const text = await res.text();
+      
+      // 如果是 token 过期错误，强制刷新 token 并重试一次
+      if (res.status === 401 && text.includes('invalid_token') && retryCount === 0) {
+        console.log('[聚源] Token 过期，强制刷新后重试...');
+        // 强制获取新 token
+        await this.getAccessToken(true);
+        // 等待一小段时间，确保新 token 生效
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return this.nlQuery({ query, answerType, limit }, retryCount + 1);
+      }
+      
       throw new Error(`Juyuan nl_query failed: ${res.status} ${text}`);
     }
 
@@ -85,11 +105,40 @@ class JuyuanAIDBClient {
     if (result.answer || result.data || result.querySql) {
       return result;
     }
-    if (result.code === 200 || result.success) {
-      return result.data || result;
+
+    throw new Error('Juyuan nl_query returned empty result');
+  }
+
+  // 结构化查询接口 - 直接使用SQL查询
+  async sqlQuery(sql, retryCount = 0) {
+    const url = `${this.baseUrl}/sql_query`;
+    const token = await this.getAccessToken();
+    
+    const payload = { sql };
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      
+      if (res.status === 401 && text.includes('invalid_token') && retryCount === 0) {
+        console.log('[聚源] Token 过期，刷新后重试...');
+        await this.getAccessToken(true);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return this.sqlQuery(sql, retryCount + 1);
+      }
+      
+      throw new Error(`Juyuan sql_query failed: ${res.status} ${text}`);
     }
 
-    throw new Error(`Juyuan nl_query error: ${JSON.stringify(result)}`);
+    return await res.json();
   }
 }
 
@@ -350,80 +399,67 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
 }
 
 /**
- * 从聚源获取单只股票从年初到现在的历史价格
+ * 从东财获取单只股票从年初到现在的历史价格
+ * 使用东财免费API，更稳定可靠
  */
-async function getSingleStockHistory(client, stockName, isFirstStock = false) {
+async function getSingleStockHistoryFromEastmoney(stockCode, stockName, isFirstStock = false) {
   try {
-    // 尝试多种查询方式
-    const queries = [
-      `查询${stockName}2025年以来的每日收盘价`,
-      `${stockName}2025年至今每日收盘价`,
-      `查询${stockName}最近200个交易日的收盘价`
-    ];
+    // 判断市场：6开头是上海，其他是深圳
+    const market = stockCode.startsWith('6') ? '1' : '0';
+    const secid = `${market}.${stockCode}`;
     
-    let result = null;
-    let usedQuery = '';
+    // 东财历史行情接口
+    const url = `http://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58&klt=101&fqt=1&beg=20250101&end=20251231&lmt=300`;
     
-    for (const query of queries) {
-      try {
-        result = await client.nlQuery({
-          query,
-          answerType: 2,
-          limit: 300
-        });
-        
-        if (result && result.data && result.data.length > 0) {
-          usedQuery = query;
-          break;
-        }
-      } catch (err) {
-        continue;
-      }
+    if (isFirstStock) {
+      console.log(`[东财] ${stockName} (${stockCode}) 查询历史价格...`);
     }
     
-    if (!result || !result.data) {
-      if (isFirstStock) {
-        console.log(`[聚源] ${stockName} 所有查询方式都失败`);
-      }
-      return { prices: [], latestChange: null };
+    const res = await fetch(url);
+    if (!res.ok) {
+      return { prices: [] };
+    }
+    
+    const data = await res.json();
+    
+    if (!data.data || !data.data.klines || data.data.klines.length === 0) {
+      return { prices: [] };
     }
     
     const prices = [];
-    let latestChange = null;
     
-    for (const group of result.data) {
-      if (!group.valueInfo) continue;
+    // 解析K线数据
+    // 格式：日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
+    for (const kline of data.data.klines) {
+      const parts = kline.split(',');
+      if (parts.length < 3) continue;
       
-      for (const item of group.valueInfo) {
-        // 打印第一只股票的第一条数据样本，用于调试
-        if (isFirstStock && prices.length === 0) {
-          console.log(`[聚源] ${stockName} 使用查询: ${usedQuery}`);
-          console.log(`[聚源] ${stockName} 数据样本:`, JSON.stringify(item));
-        }
-        
-        const closePrice = parseFloat(item.close_price || 0);
-        const date = item.endDate || item.end_date || item.trading_date || '';
-        
-        if (closePrice > 0 && date) {
-          prices.push({
-            date,
-            close: closePrice,
-          });
-        }
+      const date = parts[0].replace(/-/g, ''); // 2025-01-02 -> 20250102
+      const closePrice = parseFloat(parts[2]);
+      
+      if (closePrice > 0 && date.startsWith('2025')) {
+        prices.push({
+          date,
+          close: closePrice,
+        });
       }
     }
     
     // 按日期排序
     prices.sort((a, b) => a.date.localeCompare(b.date));
     
-    // 只保留2025年的数据
-    const prices2025 = prices.filter(p => p.date.startsWith('2025'));
+    if (isFirstStock) {
+      console.log(`[东财] ${stockName} 获取到 ${prices.length} 个交易日数据`);
+      if (prices.length > 0) {
+        console.log(`[东财] ${stockName} 数据样本: ${prices[0].date} 收盘价 ${prices[0].close}`);
+      }
+    }
     
-    return { prices: prices2025, latestChange };
+    return { prices };
     
   } catch (error) {
-    console.log(`[聚源] ${stockName} 查询异常: ${error.message}`);
-    return { prices: [], latestChange: null };
+    console.log(`[东财] ${stockName} 查询异常: ${error.message}`);
+    return { prices: [] };
   }
 }
 
@@ -516,27 +552,25 @@ async function getStockDailyChange(client, stockName) {
 }
 
 /**
- * 从聚源获取股票从年初到现在的历史价格
- * 由于聚源查询不返回股票代码，需要逐只查询
+ * 从东财获取股票从年初到现在的历史价格
+ * 使用东财免费API，稳定可靠
  */
-async function getStockHistoryPricesFromJuyuan(stockCodes, stockNames) {
+async function getStockHistoryPricesFromEastmoney(stockCodes, stockNames) {
   const currentYear = new Date().getFullYear();
-  console.log(`[聚源] 开始获取 ${stockCodes.length} 只股票从${currentYear}年初至今的历史价格...`);
+  console.log(`[东财] 开始获取 ${stockCodes.length} 只股票从${currentYear}年初至今的历史价格...`);
   
-  const client = createJuyuanClient();
   const priceData = new Map(); // code -> [{date, close}, ...]
   const changeData = new Map(); // code -> latest_change (从历史数据计算)
   
   const startTime = Date.now();
-  // 获取所有股票的年初至今历史价格（用于净值曲线）
-  const historyLimit = Math.min(50, stockCodes.length); // 查询所有50只
+  const historyLimit = Math.min(50, stockCodes.length);
   
   for (let i = 0; i < historyLimit; i++) {
     const code = stockCodes[i];
     const name = stockNames[i];
     
     try {
-      const { prices } = await getSingleStockHistory(client, name, i === 0);
+      const { prices } = await getSingleStockHistoryFromEastmoney(code, name, i === 0);
       
       if (prices.length > 0) {
         priceData.set(code, prices);
@@ -566,32 +600,45 @@ async function getStockHistoryPricesFromJuyuan(stockCodes, stockNames) {
         
         if ((i + 1) % 5 === 0 || i === historyLimit - 1) {
           const changeStr = dailyChange !== null ? `昨日涨跌 ${dailyChange.toFixed(2)}%` : '无涨跌幅';
-          console.log(`[聚源] 进度: ${i + 1}/${historyLimit} (${Math.round((i + 1) / historyLimit * 100)}%) - ${name}: ${prices.length} 个交易日, ${changeStr}`);
+          console.log(`[东财] 进度: ${i + 1}/${historyLimit} (${Math.round((i + 1) / historyLimit * 100)}%) - ${name}: ${prices.length} 个交易日, ${changeStr}`);
         }
       } else {
-        console.log(`[聚源] ✗ ${i + 1}/${historyLimit} ${name}: 无数据`);
+        console.log(`[东财] ✗ ${i + 1}/${historyLimit} ${name}: 无数据`);
         changeData.set(code, null);
       }
     } catch (error) {
-      console.log(`[聚源] ✗ ${i + 1}/${historyLimit} ${name}: 查询出错`);
+      console.log(`[东财] ✗ ${i + 1}/${historyLimit} ${name}: 查询出错 - ${error.message}`);
       changeData.set(code, null);
     }
     
-    // 间隔100ms，避免请求过快
+    // 间隔50ms，避免请求过快
     if (i < historyLimit - 1) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
   
   const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log(`[聚源] 完成: 获取到 ${priceData.size}/${historyLimit} 只股票的历史价格，总耗时 ${totalElapsed} 秒`);
+  const successRate = ((priceData.size / historyLimit) * 100).toFixed(1);
+  console.log(`[东财] 完成: 获取到 ${priceData.size}/${historyLimit} 只股票的历史价格 (成功率 ${successRate}%)，总耗时 ${totalElapsed} 秒`);
   
-  // 打印每只股票的数据量
-  if (priceData.size > 0) {
-    console.log('[聚源] 各股票数据量:');
-    for (const [code, prices] of priceData.entries()) {
-      console.log(`  ${code}: ${prices.length} 个交易日`);
+  // 如果成功率低于80%，打印失败的股票
+  if (priceData.size < historyLimit * 0.8) {
+    console.warn(`[东财] ⚠️ 成功率较低 (${successRate}%)，以下股票未获取到数据:`);
+    for (let i = 0; i < historyLimit; i++) {
+      const code = stockCodes[i];
+      if (!priceData.has(code)) {
+        console.warn(`  - ${stockNames[i]} (${code})`);
+      }
     }
+  }
+  
+  // 打印数据统计
+  if (priceData.size > 0) {
+    const dataCounts = Array.from(priceData.values()).map(p => p.length);
+    const avgCount = (dataCounts.reduce((a, b) => a + b, 0) / dataCounts.length).toFixed(0);
+    const minCount = Math.min(...dataCounts);
+    const maxCount = Math.max(...dataCounts);
+    console.log(`[东财] 数据统计: 平均 ${avgCount} 个交易日，范围 ${minCount}-${maxCount}`);
   }
   
   return { priceData, changeData };
@@ -740,7 +787,7 @@ async function buildPortfolio(stocks, topN) {
     const stockNames = validStocks.map(s => s.name);
     console.log(`[计算] 准备获取 ${stockCodes.length} 只股票的历史数据`);
     
-    const result = await getStockHistoryPricesFromJuyuan(stockCodes, stockNames);
+    const result = await getStockHistoryPricesFromEastmoney(stockCodes, stockNames);
     priceData = result.priceData;
     changeData = result.changeData;
     
