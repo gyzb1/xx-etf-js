@@ -664,6 +664,71 @@ async function getStockHistoryPricesFromEastmoney(stockCodes, stockNames) {
 }
 
 /**
+ * 获取中证红利ETF(510880)的历史价格数据作为对照组
+ */
+async function getBenchmarkETFHistory() {
+  try {
+    console.log('[对照组] 开始获取中证红利ETF(510880)历史数据...');
+    
+    // 中证红利ETF代码: 510880 (上海)
+    const secid = '1.510880';
+    const url = `http://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58&klt=101&fqt=1&beg=20250101&end=20251231&lmt=300`;
+    
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    
+    if (!res.ok) {
+      console.error('[对照组] HTTP错误:', res.status);
+      return [];
+    }
+    
+    const data = await res.json();
+    
+    if (!data.data || !data.data.klines || data.data.klines.length === 0) {
+      console.error('[对照组] 未获取到数据');
+      return [];
+    }
+    
+    const prices = [];
+    for (const kline of data.data.klines) {
+      const parts = kline.split(',');
+      const date = parts[0].replace(/-/g, '');
+      const close = parseFloat(parts[2]);
+      
+      if (close > 0) {
+        prices.push({ date, close });
+      }
+    }
+    
+    console.log(`[对照组] 成功获取 ${prices.length} 个交易日数据`);
+    return prices;
+  } catch (error) {
+    console.error('[对照组] 获取失败:', error.message);
+    return [];
+  }
+}
+
+/**
+ * 计算对照组(中证红利ETF)的净值曲线
+ */
+function calculateBenchmarkNav(benchmarkPrices) {
+  if (benchmarkPrices.length === 0) {
+    return [];
+  }
+  
+  const basePrice = benchmarkPrices[0].close;
+  
+  return benchmarkPrices.map(p => ({
+    date: p.date,
+    nav: p.close / basePrice,
+    return: ((p.close / basePrice - 1) * 100)
+  }));
+}
+
+/**
  * 判断是否是交易日且已收盘
  * A股交易时间：周一至周五 9:30-15:00
  */
@@ -796,6 +861,7 @@ async function buildPortfolio(stocks, topN) {
   
   // 获取历史价格并计算净值曲线
   let navCurve = [];
+  let benchmarkNav = [];
   let priceData = new Map();
   let changeData = new Map();
   let portfolioStocks = [];
@@ -806,7 +872,12 @@ async function buildPortfolio(stocks, topN) {
     const stockNames = validStocks.map(s => s.name);
     console.log(`[计算] 准备获取 ${stockCodes.length} 只股票的历史数据`);
     
-    const result = await getStockHistoryPricesFromEastmoney(stockCodes, stockNames);
+    // 并行获取组合股票和对照组ETF的历史数据
+    const [result, benchmarkPrices] = await Promise.all([
+      getStockHistoryPricesFromEastmoney(stockCodes, stockNames),
+      getBenchmarkETFHistory()
+    ]);
+    
     priceData = result.priceData;
     changeData = result.changeData;
     
@@ -816,6 +887,12 @@ async function buildPortfolio(stocks, topN) {
       console.log('[计算] 开始计算净值曲线...');
       navCurve = calculatePortfolioNav(validStocks, priceData);
       console.log(`[计算] 净值曲线计算完成，共 ${navCurve.length} 个数据点`);
+    }
+    
+    // 计算对照组净值曲线
+    if (benchmarkPrices.length > 0) {
+      benchmarkNav = calculateBenchmarkNav(benchmarkPrices);
+      console.log(`[对照组] 净值曲线计算完成，共 ${benchmarkNav.length} 个数据点`);
       
       // 为每只股票添加今日涨跌幅（使用聚源返回的数据）
       portfolioStocks = validStocks.map(stock => {
@@ -873,6 +950,19 @@ async function buildPortfolio(stocks, topN) {
     fund_daily_change = 0;
   }
   
+  // 计算对照组的涨跌幅
+  let benchmark_daily_change = null;
+  let benchmark_latest_nav = null;
+  
+  if (benchmarkNav.length >= 2) {
+    benchmark_latest_nav = benchmarkNav[benchmarkNav.length - 1].nav;
+    const benchmark_prev_nav = benchmarkNav[benchmarkNav.length - 2].nav;
+    benchmark_daily_change = Number((((benchmark_latest_nav / benchmark_prev_nav - 1) * 100).toFixed(2)));
+  } else if (benchmarkNav.length === 1) {
+    benchmark_latest_nav = benchmarkNav[0].nav;
+    benchmark_daily_change = 0;
+  }
+  
   return {
     portfolio_id: portfolioId,
     creation_time: new Date().toISOString().slice(0, 19).replace('T', ' '),
@@ -891,6 +981,13 @@ async function buildPortfolio(stocks, topN) {
     fund_daily_change, // 基金今日涨跌幅
     stocks: portfolioStocks,
     nav_curve: navCurve, // 净值曲线
+    benchmark: {
+      name: '中证红利ETF',
+      code: '510880',
+      latest_nav: benchmark_latest_nav,
+      daily_change: benchmark_daily_change,
+      nav_curve: benchmarkNav
+    }
   };
 }
 

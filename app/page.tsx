@@ -17,6 +17,14 @@ interface NavPoint {
   return: number
 }
 
+interface Benchmark {
+  name: string
+  code: string
+  latest_nav: number | null
+  daily_change: number | null
+  nav_curve: NavPoint[]
+}
+
 interface Portfolio {
   portfolio_id: string
   creation_time: string
@@ -37,6 +45,7 @@ interface Portfolio {
   fund_daily_change?: number | null
   stocks: Stock[]
   nav_curve?: NavPoint[]
+  benchmark?: Benchmark
 }
 
 export default function Home() {
@@ -305,15 +314,17 @@ export default function Home() {
                   alignItems: 'center',
                   gap: '8px'
                 }}>
-                  📊 净值曲线（最近30天）
+                  📊 净值曲线对比（最近30天）
                 </h2>
                 <div style={{ position: 'relative', height: '350px' }}>
                   <svg width="100%" height="100%" viewBox="0 0 800 350" preserveAspectRatio="xMidYMid meet">
                     {/* 计算坐标 */}
                     {(() => {
                       const navs = portfolio.nav_curve!.map(p => p.nav);
-                      const minNav = Math.min(...navs, 1.0);
-                      const maxNav = Math.max(...navs, 1.0);
+                      const benchmarkNavs = portfolio.benchmark?.nav_curve?.map(p => p.nav) || [];
+                      const allNavs = [...navs, ...benchmarkNavs];
+                      const minNav = Math.min(...allNavs, 1.0);
+                      const maxNav = Math.max(...allNavs, 1.0);
                       const range = maxNav - minNav || 0.1;
                       const padding = range * 0.1;
                       
@@ -351,7 +362,7 @@ export default function Home() {
                           <line x1="60" y1={baselineY} x2="740" y2={baselineY} stroke="#cbd5e0" strokeWidth="2" strokeDasharray="5,5" />
                           <text x="45" y={baselineY + 4} fontSize="11" fill="#718096" textAnchor="end" fontWeight="600">1.00</text>
                           
-                          {/* 净值曲线 */}
+                          {/* 组合净值曲线 */}
                           <polyline
                             points={points}
                             fill="none"
@@ -360,6 +371,30 @@ export default function Home() {
                             strokeLinecap="round"
                             strokeLinejoin="round"
                           />
+                          
+                          {/* 对照组净值曲线（中证红利ETF） */}
+                          {portfolio.benchmark?.nav_curve && portfolio.benchmark.nav_curve.length > 0 && (() => {
+                            const benchmarkPoints = portfolio.benchmark.nav_curve.map((point: any, i: number) => {
+                              const x = 60 + (i / (portfolio.benchmark!.nav_curve!.length - 1)) * 680;
+                              const y = 270 - ((point.nav - yMin) / yRange) * 220;
+                              return `${x},${y}`;
+                            }).join(' ');
+                            
+                            const benchmarkReturn = portfolio.benchmark.nav_curve[portfolio.benchmark.nav_curve.length - 1].return;
+                            const benchmarkColor = '#9f7aea'; // 紫色
+                            
+                            return (
+                              <polyline
+                                points={benchmarkPoints}
+                                fill="none"
+                                stroke={benchmarkColor}
+                                strokeWidth="2"
+                                strokeDasharray="5,5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            );
+                          })()}
                           
                           {/* Y轴标签 */}
                           <text x="45" y="275" fontSize="11" fill="#666" textAnchor="end">{yMin.toFixed(3)}</text>
@@ -377,15 +412,21 @@ export default function Home() {
                             );
                           })}
                           
-                          {/* 收益率标签 */}
-                          <text x="400" y="30" fontSize="16" fill={lineColor} textAnchor="middle" fontWeight="600">
-                            累计收益: {totalReturn >= 0 ? '+' : ''}{totalReturn.toFixed(2)}%
-                          </text>
-                          
-                          {/* 最新净值标签 */}
-                          <text x="400" y="50" fontSize="13" fill="#666" textAnchor="middle">
-                            最新净值: {lastPoint.nav.toFixed(4)}
-                          </text>
+                          {/* 图例 */}
+                          <g>
+                            <line x1="620" y1="25" x2="650" y2="25" stroke={lineColor} strokeWidth="3" />
+                            <text x="655" y="29" fontSize="12" fill="#666">高股息组合 {totalReturn >= 0 ? '+' : ''}{totalReturn.toFixed(2)}%</text>
+                            
+                            {portfolio.benchmark?.nav_curve && portfolio.benchmark.nav_curve.length > 0 && (
+                              <>
+                                <line x1="620" y1="45" x2="650" y2="45" stroke="#9f7aea" strokeWidth="2" strokeDasharray="5,5" />
+                                <text x="655" y="49" fontSize="12" fill="#666">
+                                  中证红利ETF {portfolio.benchmark.nav_curve[portfolio.benchmark.nav_curve.length - 1].return >= 0 ? '+' : ''}
+                                  {portfolio.benchmark.nav_curve[portfolio.benchmark.nav_curve.length - 1].return.toFixed(2)}%
+                                </text>
+                              </>
+                            )}
+                          </g>
                         </>
                       );
                     })()}
