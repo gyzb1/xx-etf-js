@@ -366,8 +366,8 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
     
     // 2. 获取扣非净利润为正的股票列表
     // 添加延迟，避免聚源API频率限制
-    console.log('[聚源] 等待2秒后查询扣非净利润数据，避免API频率限制...');
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    console.log('[聚源] 等待5秒后查询扣非净利润数据，避免API频率限制...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
     
     const stockNames = stocks.map(s => s.name);
     const profitableStocks = await getProfitableStocks(stockNames);
