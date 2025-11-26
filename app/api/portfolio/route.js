@@ -385,15 +385,20 @@ async function getHighDividendStocksFromJuyuan(topN = 50) {
     const stockNamesToQuery = topStocks.map(s => s.name);
     const nameToCode = await batchGetStockCodes(stockNamesToQuery);
     
-    // 6. 更新股票代码
+    // 6. 更新股票代码，过滤掉没有代码的股票
+    const stocksWithCode = [];
     for (const stock of topStocks) {
       const code = nameToCode.get(stock.name);
       if (code) {
         stock.code = code;
+        stocksWithCode.push(stock);
+      } else {
+        console.warn(`[东财] ${stock.name} 未找到股票代码，将被过滤`);
       }
     }
     
-    return topStocks;
+    console.log(`[聚源] 最终返回 ${stocksWithCode.length} 只有代码的股票`);
+    return stocksWithCode;
     
   } catch (error) {
     console.error('[聚源] 获取数据失败:', error.message);
@@ -624,9 +629,9 @@ async function getStockHistoryPricesFromEastmoney(stockCodes, stockNames) {
       changeData.set(code, null);
     }
     
-    // 间隔50ms，避免请求过快
+    // 间隔20ms，加快查询速度
     if (i < historyLimit - 1) {
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise(resolve => setTimeout(resolve, 20));
     }
   }
   
