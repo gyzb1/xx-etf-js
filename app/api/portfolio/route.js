@@ -6,6 +6,7 @@
 import { NextResponse } from 'next/server';
 
 // 强制动态渲染
+// 强制动态渲染，避免Vercel静态化
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
