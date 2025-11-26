@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 
+// 强制动态渲染
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
+
 interface StockData {
   code: string
   name: string
