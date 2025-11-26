@@ -417,10 +417,19 @@ async function getSingleStockHistoryFromEastmoney(stockCode, stockName, isFirstS
     
     if (isFirstStock) {
       console.log(`[东财] ${stockName} (${stockCode}) 查询历史价格...`);
+      console.log(`[东财] 请求URL: ${url}`);
     }
     
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    
     if (!res.ok) {
+      if (isFirstStock) {
+        console.error(`[东财] ${stockName} HTTP错误: ${res.status} ${res.statusText}`);
+      }
       return { prices: [] };
     }
     
