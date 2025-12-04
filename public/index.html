@@ -424,7 +424,8 @@
             }
 
             // Always use ETF replication strategy
-            const apiUrl = 'http://localhost:3001/api/backtest-etf';
+            // Use relative path to work both locally and on Vercel
+            const apiUrl = '/api/backtest-etf';
             const requestBody = {
                 startDate: formatDateForAPI(startDate),
                 endDate: formatDateForAPI(endDate)
