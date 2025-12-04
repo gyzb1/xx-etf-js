@@ -920,6 +920,11 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Root path - serve index.html
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/public/index.html');
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`Tushare token configured: ${!!TUSHARE_TOKEN}`);
